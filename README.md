@@ -14,13 +14,14 @@ For automatic mask proposal, you will need a pretrained `BLIP checkpoint` as wel
 Note that BLIP decoder checkpoint is downloaded online.
 
 <br>
-Auto-mask running script example: <br>
+Auto-mask running script example
+
 `$ python3 main.py -p 'v-neck t shirts' -i 'validation/fashion-shop/basic_crew_neck_tee.jpg' --mask_auto --output_path 'output/' --vit --mask_thresh 0.35 --style_lambda 0.01 --ot`
 <br>
 
 ### Hyperparameters
 
-Name | Role | type
+Name | Role | Type
 ---- | ---- | ----
 mask_auto     | whether to automatically generate mask; you need manual mask otherwise with `--mask`  | `store_true`
 mask_n_iter   | how much iterations to run backprops for mask generation                              | `int`
