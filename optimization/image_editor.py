@@ -22,7 +22,7 @@ import lpips
 import numpy as np
 
 from CLIP import clip
-from classifier import classifier_models
+#from classifier import classifier_models
 from guided_diffusion.guided_diffusion.script_util import (
     create_model_and_diffusion,
     model_and_diffusion_defaults,
@@ -177,7 +177,7 @@ class ImageEditor:
         self.blur = args.blur
         self.cross_entropy = nn.CrossEntropyLoss()
         self.cross_entropy_masked = nn.CrossEntropyLoss(ignore_index=0)
-        self.target = self.get_target_attr(self.args.attribute)
+        #self.target = self.get_target_attr(self.args.attribute)
 
     def get_target_attr(self, attr):
         attrs = attr.split()
@@ -510,7 +510,7 @@ class ImageEditor:
                 # x_in = out["pred_xstart"]
 
                 loss = torch.tensor(0)
-                if text_embed and self.args.clip_guidance_lambda != 0:
+                if text_embed is not None and self.args.clip_guidance_lambda != 0:
                     clip_loss = self.clip_loss(x_in, text_embed) * self.args.clip_guidance_lambda
                     loss = loss + clip_loss
                     self.metrics_accumulator.update_metric("clip_loss", clip_loss.item())
