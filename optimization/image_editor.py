@@ -172,8 +172,8 @@ class ImageEditor:
         return unscaled_timestep
 
     def blip_loss(self, x_in, text):
-        # TODO: implement BLIP loss that can replace CLIP gradient
-        pass
+        loss = self.guide_model(x_in, text)
+        return loss
 
     def clip_loss(self, x_in, text_embed):
         # incorporate directional loss
@@ -260,116 +260,6 @@ class ImageEditor:
             pseudo_cap = self.mask_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) # in text format (un-tokenized)
         return pseudo_cap
 
-    def preprocess_mask(self):
-        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
-        B = image.size(0)
-        image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
-        image_embeds = image_embeds.viwe(B, 24, 24, -1)
-
-    def propose_mask(self):
-        """
-            model       : BLIP decoder
-            query       : target text query
-            image       : input image
-            n_iter      : number of backprop steps
-            lr          : learning rate of backprop
-            neg         : whether to use positive log likelihood
-            lambda      : weight for target query likelihood
-        """
-
-        model = self.mask_model
-        query = self.args.prompt
-        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
-        n_iter = self.args.mask_n_iter
-        lr = self.args.mask_lr
-        neg = self.args.mask_flip
-        lambda_ = self.args.mask_lambda
-
-        image_embeds = model.visual_encoder(image)
-        image_embeds.requires_grad = True
-        image_embeds_ = image_embeds.data.detach().cpu().numpy()
-        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)
-
-        if self.args.mask_base_cap:
-            pseudo_cap = self.args.mask_base_cap
-        else:
-            pseudo_cap = model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5)
-            # nucleus sampling
-            # caption = model.generate(image, sample=True, top_p=0.9, max_length=20, min_length=5)
-            # print('caption: '+caption[0])
-            pseudo_cap = pseudo_cap[0]
-
-        pstext = model.tokenizer(pseudo_cap, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(
-            image.device)
-        pstext.input_ids[:, 0] = model.tokenizer.bos_token_id
-
-        decoder_pstargets = pstext.input_ids.masked_fill(pstext.input_ids == model.tokenizer.pad_token_id, -100)
-        decoder_pstargets[:, :model.prompt_length] = -100
-
-        optimizer = torch.optim.Adam([image_embeds], lr=lr)
-        # optimizer = AdamW([image_embeds], lr=lr)
-
-        text = model.tokenizer(query, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(
-            image.device)
-        text.input_ids[:, 0] = model.tokenizer.bos_token_id
-
-        decoder_targets = text.input_ids.masked_fill(text.input_ids == model.tokenizer.pad_token_id, -100)
-        decoder_targets[:, :model.prompt_length] = -100
-
-        num_steps = n_iter
-
-        for _ in range(num_steps):
-            decoder_output = model.text_decoder(text.input_ids,
-                                                attention_mask=text.attention_mask,
-                                                encoder_hidden_states=image_embeds,
-                                                encoder_attention_mask=image_atts,
-                                                labels=decoder_targets,
-                                                return_dict=True,
-                                                )
-            decoder_output_base = model.text_decoder(pstext.input_ids,
-                                                     attention_mask=pstext.attention_mask,
-                                                     encoder_hidden_states=image_embeds,
-                                                     encoder_attention_mask=image_atts,
-                                                     labels=decoder_pstargets,
-                                                     return_dict=True,
-                                                     )
-            loss_lm = (lambda_ * decoder_output.loss - decoder_output_base.loss)
-            if neg:
-                loss_lm *= -1
-            optimizer.zero_grad()
-            loss_lm.backward()
-            optimizer.step()
-
-        image_embeds_ = torch.from_numpy(image_embeds_).to(image.device)
-        mask = torch.norm(image_embeds - image_embeds_, dim=2)[0][1:].view(24, 24) # TODO: depends on patch embedding size
-        # print(mask)
-
-        mask = FF.interpolate(
-            mask.unsqueeze(0).unsqueeze(0),
-            (self.args.model_output_size, self.args.model_output_size),
-            mode='bicubic',
-            align_corners=False)
-
-        return self.getAttMap(mask.squeeze().detach().cpu().numpy())
-
-    def _normalize(self, x):
-        # Normalize to [0, 1].
-        x = x - x.min()
-        if x.max() > 0:
-            x = x / x.max()
-        return x
-
-    def getAttMap(self, attn_map, blur=False):
-        from scipy.ndimage import filters
-        if blur:
-            attn_map = filters.gaussian_filter(attn_map, 0.02 * max(attn_map.shape[:2]))
-            print("after filter ", attn_map.shape)
-        attn_map = self._normalize(attn_map)
-
-        # attn_map_c = (attn_map ** 0.7) * attn_map
-        # attn_map_c = attn_map ** 2
-        return attn_map
-
     def edit_image_by_prompt(self):
 
         if self.args.mask_auto:
@@ -410,12 +300,19 @@ class ImageEditor:
             self.mask_pil.save(mask_path)
 
         if self.args.prompt:
-            ## TODO: 0708 Implement BLIP Condition Function
-            ## TODO: First replace below text encoding with blip encoder model (if / else)
-            ## TODO: Then compute blip loss (NLL) and feed to the image editor
-            text_embed = self.guide_model.encode_text(
-                clip.tokenize(self.args.prompt).to(self.device)
-            ).float()
+            if self.args.guidance == "clip":
+                text_embed = self.encoder_model.encode_text(
+                    clip.tokenize(self.args.prompt).to(self.device)
+                ).float()
+            elif self.args.guidance == "blip":
+                text_embed = self.encoder_model.text_encoder(
+                    self.encoder_model.tokenizer(self.args.prompt, return_tensors="pt").to(self.device).input_ids,
+                    attention_mask=None,
+                    return_dict=True,
+                    mode='text'
+                ).last_hidden_state.float()
+            else:
+                raise ValueError
 
             ################################################################
             if self.args.pseudo_cap:
@@ -456,10 +353,15 @@ class ImageEditor:
                 # x_in = out["pred_xstart"]
 
                 loss = torch.tensor(0)
-                if text_embed is not None and self.args.clip_guidance_lambda != 0:
-                    clip_loss = self.clip_loss(x_in, text_embed) * self.args.clip_guidance_lambda
+                if text_embed is not None and self.args.guidance=='clip' and self.args.guidance_lambda != 0:
+                    clip_loss = self.clip_loss(x_in, text_embed) * self.args.guidance_lambda
                     loss = loss + clip_loss
                     self.metrics_accumulator.update_metric("clip_loss", clip_loss.item())
+
+                elif text_embed is not None and self.args.guidance=='blip' and self.args.guidance_lambda != 0:
+                    blip_loss = self.blip_loss(x_in, self.args.prompt) * self.args.guidance_lambda
+                    loss = loss + blip_loss
+                    self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
                 if self.args.attribute and self.args.attribute_guidance_lambda != 0:
                     attr_loss, attn = self.attribute_loss(x_in)
@@ -663,3 +565,113 @@ class ImageEditor:
                 print()
                 filename = os.path.join(self.args.output_path, self.args.output_file)
                 TF.to_pil_image(sample["pred_xstart"][0].add(1).div(2).clamp(0, 1)).save(filename)
+
+    def preprocess_mask(self):
+        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
+        B = image.size(0)
+        image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
+        image_embeds = image_embeds.viwe(B, 24, 24, -1)
+
+    def propose_mask(self):
+        """
+            model       : BLIP decoder
+            query       : target text query
+            image       : input image
+            n_iter      : number of backprop steps
+            lr          : learning rate of backprop
+            neg         : whether to use positive log likelihood
+            lambda      : weight for target query likelihood
+        """
+
+        model = self.mask_model
+        query = self.args.prompt
+        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
+        n_iter = self.args.mask_n_iter
+        lr = self.args.mask_lr
+        neg = self.args.mask_flip
+        lambda_ = self.args.mask_lambda
+
+        image_embeds = model.visual_encoder(image)
+        image_embeds.requires_grad = True
+        image_embeds_ = image_embeds.data.detach().cpu().numpy()
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)
+
+        if self.args.mask_base_cap:
+            pseudo_cap = self.args.mask_base_cap
+        else:
+            pseudo_cap = model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5)
+            # nucleus sampling
+            # caption = model.generate(image, sample=True, top_p=0.9, max_length=20, min_length=5)
+            # print('caption: '+caption[0])
+            pseudo_cap = pseudo_cap[0]
+
+        pstext = model.tokenizer(pseudo_cap, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(
+            image.device)
+        pstext.input_ids[:, 0] = model.tokenizer.bos_token_id
+
+        decoder_pstargets = pstext.input_ids.masked_fill(pstext.input_ids == model.tokenizer.pad_token_id, -100)
+        decoder_pstargets[:, :model.prompt_length] = -100
+
+        optimizer = torch.optim.Adam([image_embeds], lr=lr)
+        # optimizer = AdamW([image_embeds], lr=lr)
+
+        text = model.tokenizer(query, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(
+            image.device)
+        text.input_ids[:, 0] = model.tokenizer.bos_token_id
+
+        decoder_targets = text.input_ids.masked_fill(text.input_ids == model.tokenizer.pad_token_id, -100)
+        decoder_targets[:, :model.prompt_length] = -100
+
+        num_steps = n_iter
+
+        for _ in range(num_steps):
+            decoder_output = model.text_decoder(text.input_ids,
+                                                attention_mask=text.attention_mask,
+                                                encoder_hidden_states=image_embeds,
+                                                encoder_attention_mask=image_atts,
+                                                labels=decoder_targets,
+                                                return_dict=True,
+                                                )
+            decoder_output_base = model.text_decoder(pstext.input_ids,
+                                                     attention_mask=pstext.attention_mask,
+                                                     encoder_hidden_states=image_embeds,
+                                                     encoder_attention_mask=image_atts,
+                                                     labels=decoder_pstargets,
+                                                     return_dict=True,
+                                                     )
+            loss_lm = (lambda_ * decoder_output.loss - decoder_output_base.loss)
+            if neg:
+                loss_lm *= -1
+            optimizer.zero_grad()
+            loss_lm.backward()
+            optimizer.step()
+
+        image_embeds_ = torch.from_numpy(image_embeds_).to(image.device)
+        mask = torch.norm(image_embeds - image_embeds_, dim=2)[0][1:].view(24, 24) # TODO: depends on patch embedding size
+        # print(mask)
+
+        mask = FF.interpolate(
+            mask.unsqueeze(0).unsqueeze(0),
+            (self.args.model_output_size, self.args.model_output_size),
+            mode='bicubic',
+            align_corners=False)
+
+        return self.getAttMap(mask.squeeze().detach().cpu().numpy())
+
+    def _normalize(self, x):
+        # Normalize to [0, 1].
+        x = x - x.min()
+        if x.max() > 0:
+            x = x / x.max()
+        return x
+
+    def getAttMap(self, attn_map, blur=False):
+        from scipy.ndimage import filters
+        if blur:
+            attn_map = filters.gaussian_filter(attn_map, 0.02 * max(attn_map.shape[:2]))
+            print("after filter ", attn_map.shape)
+        attn_map = self._normalize(attn_map)
+
+        # attn_map_c = (attn_map ** 0.7) * attn_map
+        # attn_map_c = attn_map ** 2
+        return attn_map

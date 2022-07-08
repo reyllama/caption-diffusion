@@ -56,7 +56,7 @@ def get_arguments() -> argparse.Namespace:
 
     # Loss
     parser.add_argument(
-        "--clip_guidance_lambda",
+        "--guidance_lambda",
         type=float,
         help="Controls how much the image should look like the prompt",
         default=1000,
