@@ -28,7 +28,7 @@ from guided_diffusion.guided_diffusion.script_util import (
     model_and_diffusion_defaults,
 )
 from utils.visualization import show_tensor_image, show_editied_masked_image
-from BLIP.models.blip import blip_decoder
+from BLIP.models.blip import blip_decoder, blip_feature_extractor
 import json
 from datetime import datetime
 # TODO: move BLIP repo under the root dir
@@ -121,47 +121,37 @@ class ImageEditor:
         if self.model_config["use_fp16"]:
             self.model.convert_to_fp16()
 
-        # TODO: implement classifier models
-        self.clip_model, self.guide_model = None, None
-        if self.args.guidance == 'text':
-            self.clip_model = (
+        if self.args.finetuned:
+            blip_path = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_caption_capfilt_large.pth"
+        else:
+            blip_path = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth"
+
+        if self.args.guidance == 'clip':
+            self.guide_model = (
                 clip.load("ViT-B/16", device=self.device, jit=False)[0].eval().requires_grad_(False)
             )
-            self.clip_size = self.clip_model.visual.input_resolution
-        # TODO: implement self.clip_size for augmentations
-        elif self.args.guidance == 'attr_imgnet':
-            self.guide_model, self.preprocess = classifier_models.load_imagenet_vit(image_size=384)
-        elif self.args.guidance == 'attr_clip':
-            self.guide_model, self.preprocess = classifier_models.load_clip_vit()
-            self.clip_size = self.guide_model.visual.input_resolution
-        elif self.args.guidance == 'attr_both':
-            self.guide_model, self.preprocess = [None]*2, [None]*2
-            self.guide_model[0], self.preprocess[0] = classifier_models.load_imagenet_vit(image_size=384)
-            self.guide_model[1], self.preprocess[1] = classifier_models.load_clip_vit()
+            self.guidance_size = self.guide_model.visual.input_resolution
+            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
+            self.encoder_model = self.guide_model
+        elif self.args.guidance == 'blip':
+            self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
+            self.guidance_size = self.guide_model.image_size
+            self.mask_model = self.guide_model
+            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base') # TODO: check if image size 384 is compatible
         else:
             raise ValueError
-        if self.guide_model:
-            self.guide_model = self.guide_model.to(self.device)
 
-        self.clip_normalize = transforms.Normalize(
-            mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711]
-        )
+        self.normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
 
         self.lpips_model = lpips.LPIPS(net="vgg").to(self.device)
-        if self.args.fashion:
-            self.blip_model = blip_decoder(pretrained="/workspace/blended-diffusion/BLIP/checkpoints/checkpoint_2.pth", image_size=384, vit='base').to(self.device)
-            print("Fashion BLIP Model")
-        else:
-            self.blip_model = blip_decoder(pretrained='https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth', image_size=384, vit='base').to(self.device)
-            print("Ordinary BLIP Model")
         if args.vit:
             print("BLIP ViT for style extraction")
-            self.style_model = self.blip_model.visual_encoder.eval()
+            self.style_model = self.mask_model.visual_encoder.eval()
         else:
             print("VGG for style extraction")
             self.style_model = VGG().to(self.device).eval() # Added for style loss computation
 
-        for p in self.blip_model.parameters():
+        for p in self.mask_model.parameters():
             p.requires_grad = False
 
         self.image_augmentations = ImageAugmentations(self.clip_size, self.args.aug_num)
@@ -175,13 +165,6 @@ class ImageEditor:
         )
         self.init_image.requires_grad = False
         self.blur = args.blur
-        self.cross_entropy = nn.CrossEntropyLoss()
-        self.cross_entropy_masked = nn.CrossEntropyLoss(ignore_index=0)
-        #self.target = self.get_target_attr(self.args.attribute)
-
-    def get_target_attr(self, attr):
-        attrs = attr.split()
-        return [torch.LongTensor([int(att)]).to(self.device) for att in attrs]
 
     def unscale_timestep(self, t):
         unscaled_timestep = (t * (self.diffusion.num_timesteps / 1000)).long()
@@ -191,38 +174,6 @@ class ImageEditor:
     def blip_loss(self, x_in, text):
         # TODO: implement BLIP loss that can replace CLIP gradient
         pass
-
-    def attribute_loss(self, x_in):
-        # TODO: for attributes other than 0, 4 -> target should be added by 1
-        # TODO: targets have to be of the form [tensor(), ..., tensor()]
-        targets = self.target
-
-        if self.mask is not None:
-            self.mask.requires_grad = False
-            masked_input = x_in * self.mask
-        else:
-            masked_input = x_in
-        augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
-
-        # TODO: ensembling not yet implemented
-        norm_input = self.clip_normalize(augmented_input)
-        logits, attn = self.guide_model.visual.forward_pool(norm_input.to(self.device), return_attn=True) # TODO: only when we use CLIP
-        # if self.args.guidance == 'attr_clip':
-        #     logits = logits.float()
-        loss = torch.zeros([1]).to(self.device)
-        for i, (target, logit) in enumerate(zip(targets, logits)):
-            target = target.repeat(logit.size(0))
-            # print(f"logit: {logit[0]}")
-            # print(f"logit type: {logit.type()}")
-            # print(f"target: {target}")
-            # print(f"target type: {target.type()}")
-            if i in (0,4):
-                loss += self.cross_entropy(logit, target)
-                # print("I'm here!!!!!!!")
-            else:
-                loss += self.cross_entropy_masked(logit, target+1)
-
-        return loss, attn # (attribute, batch, patch_H, patch_W)
 
     def clip_loss(self, x_in, text_embed):
         # incorporate directional loss
@@ -235,8 +186,8 @@ class ImageEditor:
         else:
             masked_input = x_in
         augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
-        clip_in = self.clip_normalize(augmented_input)
-        image_embeds = self.clip_model.encode_image(clip_in).float()
+        clip_in = self.normalize(augmented_input)
+        image_embeds = self.guide_model.encode_image(clip_in).float()
 
         if self.args.pseudo_cap:
             x_base = self.init_image
@@ -248,8 +199,8 @@ class ImageEditor:
             else:
                 masked_base = x_base.detach()
             augmented_base = self.image_augmentations(masked_base).add(1).div(2)
-            clip_base = self.clip_normalize(augmented_base)
-            base_embeds = self.clip_model.encode_image(clip_base).float()
+            clip_base = self.normalize(augmented_base)
+            base_embeds = self.guide_model.encode_image(clip_base).float()
             dists = d_clip_loss(image_embeds-base_embeds, text_embed)
         else:
             dists = d_clip_loss(image_embeds, text_embed)
@@ -263,7 +214,7 @@ class ImageEditor:
 
     def unaugmented_clip_distance(self, x, text_embed):
         x = F.resize(x, [self.clip_size, self.clip_size])
-        image_embeds = self.clip_model.encode_image(x).float()
+        image_embeds = self.guide_model.encode_image(x).float()
         dists = d_clip_loss(image_embeds, text_embed)
 
         return dists.item()
@@ -287,8 +238,8 @@ class ImageEditor:
         # print(f"x0: {x0.size()}")
         # print(f"x: {x.size()}")
         if self.args. vit:
-            x0 = TF.resize(x0, [self.blip_model.image_size, self.blip_model.image_size])
-            x = TF.resize(x, [self.blip_model.image_size, self.blip_model.image_size])
+            x0 = TF.resize(x0, [self.mask_model.image_size, self.mask_model.image_size])
+            x = TF.resize(x, [self.mask_model.image_size, self.mask_model.image_size])
         x0_features = self.style_model.forward_feats(x0)
         x_features = self.style_model.forward_feats(x)
         loss = 0
@@ -304,15 +255,15 @@ class ImageEditor:
         return loss
 
     def pseudo_caption(self):
-        image = F.resize(self.init_image, [self.blip_model.image_size, self.blip_model.image_size])
+        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         with torch.no_grad():
-            pseudo_cap = self.blip_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) # in text format (un-tokenized)
+            pseudo_cap = self.mask_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) # in text format (un-tokenized)
         return pseudo_cap
 
     def preprocess_mask(self):
-        image = F.resize(self.init_image, [self.blip_model.image_size, self.blip_model.image_size])
+        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         B = image.size(0)
-        image_embeds = self.blip_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
+        image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
         image_embeds = image_embeds.viwe(B, 24, 24, -1)
 
     def propose_mask(self):
@@ -326,9 +277,9 @@ class ImageEditor:
             lambda      : weight for target query likelihood
         """
 
-        model = self.blip_model
+        model = self.mask_model
         query = self.args.prompt
-        image = F.resize(self.init_image, [self.blip_model.image_size, self.blip_model.image_size])
+        image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         n_iter = self.args.mask_n_iter
         lr = self.args.mask_lr
         neg = self.args.mask_flip
@@ -401,7 +352,7 @@ class ImageEditor:
 
         return self.getAttMap(mask.squeeze().detach().cpu().numpy())
 
-    def normalize(self, x):
+    def _normalize(self, x):
         # Normalize to [0, 1].
         x = x - x.min()
         if x.max() > 0:
@@ -413,16 +364,13 @@ class ImageEditor:
         if blur:
             attn_map = filters.gaussian_filter(attn_map, 0.02 * max(attn_map.shape[:2]))
             print("after filter ", attn_map.shape)
-        attn_map = self.normalize(attn_map)
+        attn_map = self._normalize(attn_map)
 
         # attn_map_c = (attn_map ** 0.7) * attn_map
         # attn_map_c = attn_map ** 2
         return attn_map
 
     def edit_image_by_prompt(self):
-
-        self.mask = torch.ones_like(self.init_image, device=self.device)
-        self.mask_pil = None
 
         if self.args.mask_auto:
             mask_np = self.propose_mask()
@@ -440,16 +388,7 @@ class ImageEditor:
             assert self.mask.requires_grad == False, "mask is not updated"
             # self.mask_pil = TF.to_pil_image(self.mask.squeeze().cpu().numpy() * 255)
 
-            ## TODO: Save attention map (mask) with getAttnMap function (show_edited_masked_image 쪽 변경하기!!)
-            ## TODO: self.mask는 normalize 안되어있으므로 이 부분도 반영! (normalize 해야되는 부분은 self.mask_norm 이용하기!!)
-
-            if self.args.export_assets:
-                mask_path = self.assets_path / Path(
-                    self.args.output_file.replace(".png", "_mask.png")
-                )
-                self.mask_pil.save(mask_path)
-
-        elif self.args.mask is not None:
+        elif self.args.mask:
             self.mask_pil = Image.open(self.args.mask).convert("RGB")
             if self.mask_pil.size != self.image_size:
                 self.mask_pil = self.mask_pil.resize(self.image_size, Image.NEAREST)  # type: ignore
@@ -460,17 +399,24 @@ class ImageEditor:
             self.mask = TF.to_tensor(Image.fromarray(image_mask_pil_binarized))
             self.mask = self.mask[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
 
-            if self.args.export_assets:
-                mask_path = self.assets_path / Path(
-                    self.args.output_file.replace(".png", "_mask.png")
-                )
-                self.mask_pil.save(mask_path)
+        else:
+            self.mask = torch.ones_like(self.init_image, device=self.device)
+            self.mask_pil = TF.to_pil_image(self.mask.squeeze().cpu().numpy() * 255)
+
+        if self.args.export_assets:
+            mask_path = self.assets_path / Path(
+                self.args.output_file.replace(".png", "_mask.png")
+            )
+            self.mask_pil.save(mask_path)
+
         if self.args.prompt:
-            text_embed = self.clip_model.encode_text(
+            ## TODO: 0708 Implement BLIP Condition Function
+            ## TODO: First replace below text encoding with blip encoder model (if / else)
+            ## TODO: Then compute blip loss (NLL) and feed to the image editor
+            text_embed = self.guide_model.encode_text(
                 clip.tokenize(self.args.prompt).to(self.device)
             ).float()
 
-            # TODO: why do we have to use CLIP?? Later modify to use BLIP
             ################################################################
             if self.args.pseudo_cap:
                 if self.args.mask_base_cap:
@@ -479,7 +425,7 @@ class ImageEditor:
                 else:
                     pseudo_cap = self.pseudo_caption()
                     print(f"Using pseudo caption: {pseudo_cap}")
-                pseudo_cap_embed = self.clip_model.encode_text(
+                pseudo_cap_embed = self.guide_model.encode_text(
                     clip.tokenize(pseudo_cap).to(self.device)
                 ).float()
 

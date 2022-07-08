@@ -6,14 +6,14 @@ def get_arguments() -> argparse.Namespace:
 
     # Inputs
     parser.add_argument(
-        "-p", "--prompt", type=str, help="The prompt for the desired editing", required=False, default=None
+        "-p", "--prompt", type=str, help="The prompt for the desired editing", required=True, default=None
     )
     parser.add_argument(
         "-i", "--init_image", type=str, help="The path to the source image input", required=True
     )
-    parser.add_argument(
-        "-a", "--attribute", type=str, help="The attributes for the image separated by white space", required=False, default=None
-    )
+    # parser.add_argument(
+    #     "-a", "--attribute", type=str, help="The attributes for the image separated by white space", required=False, default=None
+    # )
     parser.add_argument("--mask", type=str, help="The path to the mask to edit with", default=None)
 
     # Diffusion
@@ -25,8 +25,8 @@ def get_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--guidance",
-        default="text",
-        choices=["text", "attr_imgnet", "attr_clip", "attr"],
+        default="clip",
+        choices=["clip", "blip"],
         help="how to provide diffusion guidance"
     )
     parser.add_argument(
@@ -93,9 +93,9 @@ def get_arguments() -> argparse.Namespace:
         help="style preservation loss weight",
         default=1.0
     )
+    parser.add_argument("--finetuned", action='store_true', help='whether to load BLIP ckpt finetuned on COCO captioning')
     parser.add_argument("--vit", action='store_true')
     parser.add_argument("--pseudo_cap", action="store_true")
-    parser.add_argument("--fashion", action='store_true')
     parser.add_argument("--blur", action='store_true', help='whether to blur the mask (after binarization)')
     parser.add_argument("--ot", action='store_true', help='whether to employ feature matching loss (optimal transport)')
 
