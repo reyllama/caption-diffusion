@@ -133,6 +133,7 @@ class ImageEditor:
             self.guidance_size = self.guide_model.visual.input_resolution
             self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.encoder_model = self.guide_model
+
         elif self.args.guidance == 'blip':
             self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
@@ -154,7 +155,7 @@ class ImageEditor:
         for p in self.mask_model.parameters():
             p.requires_grad = False
 
-        self.image_augmentations = ImageAugmentations(self.clip_size, self.args.aug_num)
+        self.image_augmentations = ImageAugmentations(self.guidance_size, self.args.aug_num)
         self.metrics_accumulator = MetricsAccumulator()
 
         self.image_size = (self.model_config["image_size"], self.model_config["image_size"])
@@ -237,7 +238,7 @@ class ImageEditor:
     def style_loss(self, x0, x):
         # print(f"x0: {x0.size()}")
         # print(f"x: {x.size()}")
-        if self.args. vit:
+        if self.args.vit:
             x0 = TF.resize(x0, [self.mask_model.image_size, self.mask_model.image_size])
             x = TF.resize(x, [self.mask_model.image_size, self.mask_model.image_size])
         x0_features = self.style_model.forward_feats(x0)
@@ -469,7 +470,7 @@ class ImageEditor:
                             os.path.join(self.args.output_path, self.args.output_file)
                         )
                         visualization_path = visualization_path.with_stem(
-                            f"{visualization_path.stem}_i_{iteration_number}_b_{b}"
+                            f"{visualization_path.stem}_i_{iteration_number}_b_{b}_j_{j}"
                         )
 
                         # if (
@@ -570,7 +571,7 @@ class ImageEditor:
         image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         B = image.size(0)
         image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
-        image_embeds = image_embeds.viwe(B, 24, 24, -1)
+        image_embeds = image_embeds.view(B, 24, 24, -1)
 
     def propose_mask(self):
         """
