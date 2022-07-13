@@ -108,7 +108,7 @@ class ImageEditor:
         self.model, self.diffusion = create_model_and_diffusion(**self.model_config)
         self.model.load_state_dict(
             torch.load(
-                "checkpoints/256x256_diffusion_uncond.pt"
+                "/workspace/blended-diffusion/checkpoints/256x256_diffusion_uncond.pt"
                 if self.args.model_output_size == 256
                 else "checkpoints/512x512_diffusion.pt",
                 map_location="cpu",
@@ -178,7 +178,9 @@ class ImageEditor:
             masked_input = x_in * self.mask
         else:
             masked_input = x_in
-        augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
+
+        augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
+        
         blip_in = self.normalize(augmented_input)
         blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
         # loss = torch.zeros([1]).to(self.device)
@@ -306,7 +308,9 @@ class ImageEditor:
             self.mask = torch.ones_like(self.init_image, device=self.device)
             self.mask_ = self.mask.squeeze().cpu().numpy()
             print(self.mask_.shape)
-            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1, 2, 0) * 255).astype(np.uint8))
+
+            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1,2,0) * 255).astype(np.uint8))
+
         if self.args.export_assets:
             mask_path = self.assets_path / Path(
                 self.args.output_file.replace(".png", "_mask.png")
@@ -405,6 +409,7 @@ class ImageEditor:
                     loss = loss + attr_loss
                     self.metrics_accumulator.update_metric("attr_loss", attr_loss.item())
                 '''
+
                 if self.args.range_lambda != 0:
                     r_loss = range_loss(out["pred_xstart"]).sum() * self.args.range_lambda
                     loss = loss + r_loss
@@ -536,24 +541,6 @@ class ImageEditor:
 
                         intermediate_samples[b].append(pred_image_pil)
                         if should_save_image:
-                            # if self.args.attribute and self.mask.mean() > 0.9 and self.args.background_preservation_loss:
-                            #     show_editied_masked_image(
-                            #         title=self.args.prompt,
-                            #         source_image=self.init_image_pil,
-                            #         edited_image=pred_image_pil,
-                            #         mask=TF.to_pil_image(self.attn[0]),
-                            #         path=visualization_path,
-                            #         distance=formatted_distance,
-                            #     )
-                            # else:
-                            #     show_editied_masked_image(
-                            #         title=self.args.prompt,
-                            #         source_image=self.init_image_pil,
-                            #         edited_image=pred_image_pil,
-                            #         mask=self.mask_pil,
-                            #         path=visualization_path,
-                            #         distance=formatted_distance,
-                            #     )
                             show_editied_masked_image(
                                 title=self.args.prompt,
                                 source_image=self.init_image_pil,

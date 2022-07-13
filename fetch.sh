@@ -1,0 +1,1 @@
+kubectl cp gm-master-0:/workspace/caption-diffusion/output ~/research/caption-diffusion-output/ouptut --kubeconfig ~/r.conf --retries 5
