@@ -138,7 +138,7 @@ class ImageEditor:
             self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
             self.mask_model = self.guide_model
-            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base') # TODO: check if image size 384 is compatible
+            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
         else:
             raise ValueError
 
@@ -173,7 +173,19 @@ class ImageEditor:
         return unscaled_timestep
 
     def blip_loss(self, x_in, text):
-        loss = self.guide_model(x_in, text)
+        if self.mask is not None:
+            self.mask.requires_grad = False
+            masked_input = x_in * self.mask
+        else:
+            masked_input = x_in
+        augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
+        blip_in = self.normalize(augmented_input)
+        blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
+        # loss = torch.zeros([1]).to(self.device)
+        # for view in blip_in:
+        #     loss += self.guide_model(view.unsqueeze(0))
+        texts = [text for _ in range(len(blip_in))]
+        loss = self.guide_model(blip_in, texts)
         return loss
 
     def clip_loss(self, x_in, text_embed):
@@ -214,7 +226,7 @@ class ImageEditor:
         return clip_loss
 
     def unaugmented_clip_distance(self, x, text_embed):
-        x = F.resize(x, [self.clip_size, self.clip_size])
+        x = F.resize(x, [self.guidance_size, self.guidance_size])
         image_embeds = self.guide_model.encode_image(x).float()
         dists = d_clip_loss(image_embeds, text_embed)
 
@@ -292,8 +304,9 @@ class ImageEditor:
 
         else:
             self.mask = torch.ones_like(self.init_image, device=self.device)
-            self.mask_pil = TF.to_pil_image(self.mask.squeeze().cpu().numpy() * 255)
-
+            self.mask_ = self.mask.squeeze().cpu().numpy()
+            print(self.mask_.shape)
+            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1, 2, 0) * 255).astype(np.uint8))
         if self.args.export_assets:
             mask_path = self.assets_path / Path(
                 self.args.output_file.replace(".png", "_mask.png")
@@ -303,7 +316,7 @@ class ImageEditor:
         if self.args.prompt:
             if self.args.guidance == "clip":
                 text_embed = self.encoder_model.encode_text(
-                    clip.tokenize(self.args.prompt).to(self.device)
+                    self.encoder_model.tokenize(self.args.prompt).to(self.device)
                 ).float()
             elif self.args.guidance == "blip":
                 text_embed = self.encoder_model.text_encoder(
@@ -316,6 +329,7 @@ class ImageEditor:
                 raise ValueError
 
             ################################################################
+            # TODO: check if text embedding size is the same as the pseudo caption embedding size
             if self.args.pseudo_cap:
                 if self.args.mask_base_cap:
                     print(f"Using provided caption: {self.args.mask_base_cap}")
@@ -323,10 +337,20 @@ class ImageEditor:
                 else:
                     pseudo_cap = self.pseudo_caption()
                     print(f"Using pseudo caption: {pseudo_cap}")
-                pseudo_cap_embed = self.guide_model.encode_text(
-                    clip.tokenize(pseudo_cap).to(self.device)
-                ).float()
 
+                if self.args.guidance == "clip":
+                    pseudo_cap_embed = self.encoder_model.encode_text(
+                        self.encoder_model.tokenize(pseudo_cap).to(self.device)
+                    ).float()
+                elif self.args.guidance == "blip":
+                    pseudo_cap_embed = self.encoder_model.text_encoder(
+                        self.encoder_model.tokenizer(pseudo_cap, return_tensors="pt").to(self.device).input_ids,
+                        attention_mask=None,
+                        return_dict=True,
+                        mode='text'
+                    ).last_hidden_state.float()
+                else:
+                    raise ValueError
                 text_embed = text_embed - pseudo_cap_embed
             ################################################################
         else:
@@ -364,6 +388,7 @@ class ImageEditor:
                     loss = loss + blip_loss
                     self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
+                '''
                 if self.args.attribute and self.args.attribute_guidance_lambda != 0:
                     attr_loss, attn = self.attribute_loss(x_in)
                     # scale_factor = (x_in.size(-1) / attn.size(-1))**2
@@ -379,7 +404,7 @@ class ImageEditor:
                     attr_loss = attr_loss * self.args.attribute_guidance_lambda
                     loss = loss + attr_loss
                     self.metrics_accumulator.update_metric("attr_loss", attr_loss.item())
-
+                '''
                 if self.args.range_lambda != 0:
                     r_loss = range_loss(out["pred_xstart"]).sum() * self.args.range_lambda
                     loss = loss + r_loss
@@ -388,12 +413,13 @@ class ImageEditor:
                 if self.args.background_preservation_loss:
                     background_loss = torch.zeros([1]).to(self.device)
                     if self.mask is not None:
-                        if self.args.attribute and self.mask.mean() > 0.9:
-                            # print("Using Effective Attention Maps")
-                            masked_background = x_in * (1 - effective_attn)
-                            self.attn = effective_attn
-                        else:
-                            masked_background = x_in * (1 - self.mask)
+                        # if self.args.attribute and self.mask.mean() > 0.9:
+                        #     # print("Using Effective Attention Maps")
+                        #     masked_background = x_in * (1 - effective_attn)
+                        #     self.attn = effective_attn
+                        # else:
+                        #     masked_background = x_in * (1 - self.mask)
+                        masked_background = x_in * (1 - self.mask)
                     else:
                         masked_background = x_in
 
@@ -510,24 +536,32 @@ class ImageEditor:
 
                         intermediate_samples[b].append(pred_image_pil)
                         if should_save_image:
-                            if self.args.attribute and self.mask.mean() > 0.9 and self.args.background_preservation_loss:
-                                show_editied_masked_image(
-                                    title=self.args.prompt,
-                                    source_image=self.init_image_pil,
-                                    edited_image=pred_image_pil,
-                                    mask=TF.to_pil_image(self.attn[0]),
-                                    path=visualization_path,
-                                    distance=formatted_distance,
-                                )
-                            else:
-                                show_editied_masked_image(
-                                    title=self.args.prompt,
-                                    source_image=self.init_image_pil,
-                                    edited_image=pred_image_pil,
-                                    mask=self.mask_pil,
-                                    path=visualization_path,
-                                    distance=formatted_distance,
-                                )
+                            # if self.args.attribute and self.mask.mean() > 0.9 and self.args.background_preservation_loss:
+                            #     show_editied_masked_image(
+                            #         title=self.args.prompt,
+                            #         source_image=self.init_image_pil,
+                            #         edited_image=pred_image_pil,
+                            #         mask=TF.to_pil_image(self.attn[0]),
+                            #         path=visualization_path,
+                            #         distance=formatted_distance,
+                            #     )
+                            # else:
+                            #     show_editied_masked_image(
+                            #         title=self.args.prompt,
+                            #         source_image=self.init_image_pil,
+                            #         edited_image=pred_image_pil,
+                            #         mask=self.mask_pil,
+                            #         path=visualization_path,
+                            #         distance=formatted_distance,
+                            #     )
+                            show_editied_masked_image(
+                                title=self.args.prompt,
+                                source_image=self.init_image_pil,
+                                edited_image=pred_image_pil,
+                                mask=self.mask_pil,
+                                path=visualization_path,
+                                distance=formatted_distance,
+                            )
 
             if self.args.save_video:
                 for b in range(self.args.batch_size):
