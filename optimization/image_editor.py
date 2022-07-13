@@ -108,7 +108,7 @@ class ImageEditor:
         self.model, self.diffusion = create_model_and_diffusion(**self.model_config)
         self.model.load_state_dict(
             torch.load(
-                "checkpoints/256x256_diffusion_uncond.pt"
+                "/workspace/blended-diffusion/checkpoints/256x256_diffusion_uncond.pt"
                 if self.args.model_output_size == 256
                 else "checkpoints/512x512_diffusion.pt",
                 map_location="cpu",
@@ -137,7 +137,7 @@ class ImageEditor:
             self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
             self.mask_model = self.guide_model
-            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base') # TODO: check if image size 384 is compatible
+            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
         else:
             raise ValueError
 
@@ -154,7 +154,7 @@ class ImageEditor:
         for p in self.mask_model.parameters():
             p.requires_grad = False
 
-        self.image_augmentations = ImageAugmentations(self.clip_size, self.args.aug_num)
+        self.image_augmentations = ImageAugmentations(self.guidance_size, self.args.aug_num)
         self.metrics_accumulator = MetricsAccumulator()
 
         self.image_size = (self.model_config["image_size"], self.model_config["image_size"])
@@ -172,7 +172,19 @@ class ImageEditor:
         return unscaled_timestep
 
     def blip_loss(self, x_in, text):
-        loss = self.guide_model(x_in, text)
+        if self.mask is not None:
+            self.mask.requires_grad = False
+            masked_input = x_in * self.mask
+        else:
+            masked_input = x_in
+        augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
+        blip_in = self.normalize(augmented_input)
+        blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
+        # loss = torch.zeros([1]).to(self.device)
+        # for view in blip_in:
+        #     loss += self.guide_model(view.unsqueeze(0))
+        texts = [text for _ in range(len(blip_in))]
+        loss = self.guide_model(blip_in, texts)
         return loss
 
     def clip_loss(self, x_in, text_embed):
@@ -213,7 +225,7 @@ class ImageEditor:
         return clip_loss
 
     def unaugmented_clip_distance(self, x, text_embed):
-        x = F.resize(x, [self.clip_size, self.clip_size])
+        x = F.resize(x, [self.guidance_size, self.guidance_size])
         image_embeds = self.guide_model.encode_image(x).float()
         dists = d_clip_loss(image_embeds, text_embed)
 
@@ -291,7 +303,9 @@ class ImageEditor:
 
         else:
             self.mask = torch.ones_like(self.init_image, device=self.device)
-            self.mask_pil = TF.to_pil_image(self.mask.squeeze().cpu().numpy() * 255)
+            self.mask_ = self.mask.squeeze().cpu().numpy()
+            print(self.mask_.shape)
+            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1,2,0) * 255).astype(np.uint8))
 
         if self.args.export_assets:
             mask_path = self.assets_path / Path(
@@ -363,21 +377,21 @@ class ImageEditor:
                     loss = loss + blip_loss
                     self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
-                if self.args.attribute and self.args.attribute_guidance_lambda != 0:
-                    attr_loss, attn = self.attribute_loss(x_in)
-                    # scale_factor = (x_in.size(-1) / attn.size(-1))**2
-                    scale_factor = 1.0
-                    attn = FF.interpolate(attn, x_in.shape[-2:]) / scale_factor # (n_attr, batch, H, W)
-                    effective_idxs = []
-                    for i, v in enumerate(self.args.attribute.split()):
-                        if int(v) != -1:
-                            effective_idxs += [int(i)]
-                    effective_attn = attn[effective_idxs]
-                    effective_attn = effective_attn.mean(dim=0).unsqueeze(0) # (1, batch, H, W)
-                    effective_attn = effective_attn.mean(dim=1).unsqueeze(1)
-                    attr_loss = attr_loss * self.args.attribute_guidance_lambda
-                    loss = loss + attr_loss
-                    self.metrics_accumulator.update_metric("attr_loss", attr_loss.item())
+                # if self.args.attribute and self.args.attribute_guidance_lambda != 0:
+                #     attr_loss, attn = self.attribute_loss(x_in)
+                #     # scale_factor = (x_in.size(-1) / attn.size(-1))**2
+                #     scale_factor = 1.0
+                #     attn = FF.interpolate(attn, x_in.shape[-2:]) / scale_factor # (n_attr, batch, H, W)
+                #     effective_idxs = []
+                #     for i, v in enumerate(self.args.attribute.split()):
+                #         if int(v) != -1:
+                #             effective_idxs += [int(i)]
+                #     effective_attn = attn[effective_idxs]
+                #     effective_attn = effective_attn.mean(dim=0).unsqueeze(0) # (1, batch, H, W)
+                #     effective_attn = effective_attn.mean(dim=1).unsqueeze(1)
+                #     attr_loss = attr_loss * self.args.attribute_guidance_lambda
+                #     loss = loss + attr_loss
+                #     self.metrics_accumulator.update_metric("attr_loss", attr_loss.item())
 
                 if self.args.range_lambda != 0:
                     r_loss = range_loss(out["pred_xstart"]).sum() * self.args.range_lambda
@@ -509,24 +523,15 @@ class ImageEditor:
 
                         intermediate_samples[b].append(pred_image_pil)
                         if should_save_image:
-                            if self.args.attribute and self.mask.mean() > 0.9 and self.args.background_preservation_loss:
-                                show_editied_masked_image(
-                                    title=self.args.prompt,
-                                    source_image=self.init_image_pil,
-                                    edited_image=pred_image_pil,
-                                    mask=TF.to_pil_image(self.attn[0]),
-                                    path=visualization_path,
-                                    distance=formatted_distance,
-                                )
-                            else:
-                                show_editied_masked_image(
-                                    title=self.args.prompt,
-                                    source_image=self.init_image_pil,
-                                    edited_image=pred_image_pil,
-                                    mask=self.mask_pil,
-                                    path=visualization_path,
-                                    distance=formatted_distance,
-                                )
+
+                            show_editied_masked_image(
+                                title=self.args.prompt,
+                                source_image=self.init_image_pil,
+                                edited_image=pred_image_pil,
+                                mask=self.mask_pil,
+                                path=visualization_path,
+                                distance=formatted_distance,
+                            )
 
             if self.args.save_video:
                 for b in range(self.args.batch_size):
