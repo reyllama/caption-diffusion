@@ -123,8 +123,10 @@ class ImageEditor:
 
         if self.args.finetuned:
             blip_path = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_caption_capfilt_large.pth"
+            encoder_path = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth"
         else:
             blip_path = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth"
+            encoder_path = blip_path
 
         if self.args.guidance == 'clip':
             self.guide_model = (
@@ -137,7 +139,7 @@ class ImageEditor:
             self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
             self.mask_model = self.guide_model
-            self.encoder_model = blip_feature_extractor(pretrained=blip_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
+            self.encoder_model = blip_feature_extractor(pretrained=encoder_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
         else:
             raise ValueError
 
