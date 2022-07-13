@@ -274,6 +274,11 @@ class ImageEditor:
 
     def edit_image_by_prompt(self):
 
+        mask_np = (self.propose_mask() * 255).astype(np.uint8)
+        self.attn = TF.to_tensor(Image.fromarray(mask_np))
+        self.attn = self.attn[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
+        self.attn.requires_grad = False
+
         if self.args.mask_auto:
             mask_np = self.propose_mask()
             mask_binarized = ((mask_np > self.args.mask_thresh) * 255).astype(np.uint8)  # 0.35: woman and her dog / 0.3: t shirts
@@ -377,22 +382,6 @@ class ImageEditor:
                     loss = loss + blip_loss
                     self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
-                # if self.args.attribute and self.args.attribute_guidance_lambda != 0:
-                #     attr_loss, attn = self.attribute_loss(x_in)
-                #     # scale_factor = (x_in.size(-1) / attn.size(-1))**2
-                #     scale_factor = 1.0
-                #     attn = FF.interpolate(attn, x_in.shape[-2:]) / scale_factor # (n_attr, batch, H, W)
-                #     effective_idxs = []
-                #     for i, v in enumerate(self.args.attribute.split()):
-                #         if int(v) != -1:
-                #             effective_idxs += [int(i)]
-                #     effective_attn = attn[effective_idxs]
-                #     effective_attn = effective_attn.mean(dim=0).unsqueeze(0) # (1, batch, H, W)
-                #     effective_attn = effective_attn.mean(dim=1).unsqueeze(1)
-                #     attr_loss = attr_loss * self.args.attribute_guidance_lambda
-                #     loss = loss + attr_loss
-                #     self.metrics_accumulator.update_metric("attr_loss", attr_loss.item())
-
                 if self.args.range_lambda != 0:
                     r_loss = range_loss(out["pred_xstart"]).sum() * self.args.range_lambda
                     loss = loss + r_loss
@@ -400,15 +389,7 @@ class ImageEditor:
 
                 if self.args.background_preservation_loss:
                     background_loss = torch.zeros([1]).to(self.device)
-                    if self.mask is not None:
-                        if self.args.attribute and self.mask.mean() > 0.9:
-                            # print("Using Effective Attention Maps")
-                            masked_background = x_in * (1 - effective_attn)
-                            self.attn = effective_attn
-                        else:
-                            masked_background = x_in * (1 - self.mask)
-                    else:
-                        masked_background = x_in
+                    masked_background = x_in * (1 - self.attn)
 
                     if self.args.lpips_sim_lambda:
                         loss = (
