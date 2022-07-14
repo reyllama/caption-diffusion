@@ -135,6 +135,7 @@ class ImageEditor:
             self.guidance_size = self.guide_model.visual.input_resolution
             self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.encoder_model = self.guide_model
+
         elif self.args.guidance == 'blip':
             self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
@@ -179,7 +180,9 @@ class ImageEditor:
             masked_input = x_in * self.mask
         else:
             masked_input = x_in
+
         augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
+        
         blip_in = self.normalize(augmented_input)
         blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
         # loss = torch.zeros([1]).to(self.device)
@@ -251,7 +254,7 @@ class ImageEditor:
     def style_loss(self, x0, x):
         # print(f"x0: {x0.size()}")
         # print(f"x: {x.size()}")
-        if self.args. vit:
+        if self.args.vit:
             x0 = TF.resize(x0, [self.mask_model.image_size, self.mask_model.image_size])
             x = TF.resize(x, [self.mask_model.image_size, self.mask_model.image_size])
         x0_features = self.style_model.forward_feats(x0)
@@ -312,6 +315,7 @@ class ImageEditor:
             self.mask = torch.ones_like(self.init_image, device=self.device)
             self.mask_ = self.mask.squeeze().cpu().numpy()
             print(self.mask_.shape)
+
             self.mask_pil = TF.to_pil_image((self.mask_.transpose(1,2,0) * 255).astype(np.uint8))
 
         if self.args.export_assets:
@@ -323,7 +327,7 @@ class ImageEditor:
         if self.args.prompt:
             if self.args.guidance == "clip":
                 text_embed = self.encoder_model.encode_text(
-                    clip.tokenize(self.args.prompt).to(self.device)
+                    self.encoder_model.tokenize(self.args.prompt).to(self.device)
                 ).float()
             elif self.args.guidance == "blip":
                 text_embed = self.encoder_model.text_encoder(
@@ -336,6 +340,7 @@ class ImageEditor:
                 raise ValueError
 
             ################################################################
+            # TODO: check if text embedding size is the same as the pseudo caption embedding size
             if self.args.pseudo_cap:
                 if self.args.mask_base_cap:
                     print(f"Using provided caption: {self.args.mask_base_cap}")
@@ -343,10 +348,20 @@ class ImageEditor:
                 else:
                     pseudo_cap = self.pseudo_caption()
                     print(f"Using pseudo caption: {pseudo_cap}")
-                pseudo_cap_embed = self.guide_model.encode_text(
-                    clip.tokenize(pseudo_cap).to(self.device)
-                ).float()
 
+                if self.args.guidance == "clip":
+                    pseudo_cap_embed = self.encoder_model.encode_text(
+                        self.encoder_model.tokenize(pseudo_cap).to(self.device)
+                    ).float()
+                elif self.args.guidance == "blip":
+                    pseudo_cap_embed = self.encoder_model.text_encoder(
+                        self.encoder_model.tokenizer(pseudo_cap, return_tensors="pt").to(self.device).input_ids,
+                        attention_mask=None,
+                        return_dict=True,
+                        mode='text'
+                    ).last_hidden_state.float()
+                else:
+                    raise ValueError
                 text_embed = text_embed - pseudo_cap_embed
             ################################################################
         else:
@@ -466,7 +481,7 @@ class ImageEditor:
                             os.path.join(self.args.output_path, self.args.output_file)
                         )
                         visualization_path = visualization_path.with_stem(
-                            f"{visualization_path.stem}_i_{iteration_number}_b_{b}"
+                            f"{visualization_path.stem}_i_{iteration_number}_b_{b}_j_{j}"
                         )
 
                         # if (
@@ -506,7 +521,6 @@ class ImageEditor:
 
                         intermediate_samples[b].append(pred_image_pil)
                         if should_save_image:
-
                             show_editied_masked_image(
                                 title=self.args.prompt,
                                 source_image=self.init_image_pil,
@@ -558,7 +572,7 @@ class ImageEditor:
         image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         B = image.size(0)
         image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
-        image_embeds = image_embeds.viwe(B, 24, 24, -1)
+        image_embeds = image_embeds.view(B, 24, 24, -1)
 
     def propose_mask(self):
         """
