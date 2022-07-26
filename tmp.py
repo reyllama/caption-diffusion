@@ -22,16 +22,17 @@ import lpips
 import numpy as np
 
 from CLIP import clip
-#from classifier import classifier_models
+# from classifier import classifier_models
 from guided_diffusion.guided_diffusion.script_util import (
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
 from utils.visualization import show_tensor_image, show_editied_masked_image
 from BLIP.models.blip import blip_decoder, blip_feature_extractor
-from BLIP.models.blip_itm import blip_itm
 import json
 from datetime import datetime
+
+
 # TODO: move BLIP repo under the root dir
 
 class VGG(nn.Module):
@@ -57,6 +58,7 @@ class VGG(nn.Module):
                 features.append(x)
 
         return features
+
 
 class ImageEditor:
     def __init__(self, args) -> None:
@@ -134,21 +136,20 @@ class ImageEditor:
                 clip.load("ViT-B/16", device=self.device, jit=False)[0].eval().requires_grad_(False)
             )
             self.guidance_size = self.guide_model.visual.input_resolution
-            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
+            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.encoder_model = self.guide_model
 
         elif self.args.guidance == 'blip':
-            if self.args.itm or self.args.itc:
-                self.guide_model = blip_itm(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
-            else:
-                self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
+            self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
             self.guidance_size = self.guide_model.image_size
-            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
-            self.encoder_model = blip_feature_extractor(pretrained=encoder_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
+            self.mask_model = self.guide_model
+            self.encoder_model = blip_feature_extractor(pretrained=encoder_path, image_size=384, vit='base').to(
+                self.device)  # TODO: check if image size 384 is compatible
         else:
-            raise ValueError("Unrecognized Guidance Type")
+            raise ValueError
 
-        self.normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
+        self.normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                                              std=[0.26862954, 0.26130258, 0.27577711])
 
         self.lpips_model = lpips.LPIPS(net="vgg").to(self.device)
         if args.vit:
@@ -178,51 +179,35 @@ class ImageEditor:
 
         return unscaled_timestep
 
-    def _mask_input(self, x_in):
+    def blip_loss(self, x_in, text):
         if self.mask is not None:
             self.mask.requires_grad = False
             masked_input = x_in * self.mask
         else:
             masked_input = x_in
-<<<<<<< HEAD
-        return masked_input
 
-    def _blip_preprocess(self, x_in, text):
-        masked_input = self._mask_input(x_in)
         augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
-=======
 
-        augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
-        
->>>>>>> 3390e2bdda1ff46577a69be60b897e226e8be8eb
         blip_in = self.normalize(augmented_input)
         blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
+        # loss = torch.zeros([1]).to(self.device)
+        # for view in blip_in:
+        #     loss += self.guide_model(view.unsqueeze(0))
         texts = [text for _ in range(len(blip_in))]
-        return blip_in, texts
-
-    def blip_loss(self, x_in, text):
-        blip_in, texts = self._blip_preprocess(x_in, text)
         loss = self.guide_model(blip_in, texts)
         return loss
-
-    def blip_itc_loss(self, x_in, text):
-        blip_in, texts = self._blip_preprocess(x_in, text)
-        itc_score = self.guide_model(blip_in, texts, match_head='itc')[0].mean()
-        return itc_score
-
-    def blip_itm_loss(self, x_in, text):
-        blip_in, texts = self._blip_preprocess(x_in, text)
-        itm_output = self.guide_model(blip_in, texts, match_head='itm')
-        itm_score = torch.nn.functional.softmax(itm_output, dim=1)[:, 1].mean()
-        return itm_score
 
     def clip_loss(self, x_in, text_embed):
         # incorporate directional loss
         clip_loss = torch.tensor(0)
         x_base = None
 
-        masked_input = self._mask_input(x_in)
-        augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
+        if self.mask is not None:
+            self.mask.requires_grad = False
+            masked_input = x_in * self.mask
+        else:
+            masked_input = x_in
+        augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
         clip_in = self.normalize(augmented_input)
         image_embeds = self.guide_model.encode_image(clip_in).float()
 
@@ -238,14 +223,14 @@ class ImageEditor:
             augmented_base = self.image_augmentations(masked_base).add(1).div(2)
             clip_base = self.normalize(augmented_base)
             base_embeds = self.guide_model.encode_image(clip_base).float()
-            dists = d_clip_loss(image_embeds-base_embeds, text_embed)
+            dists = d_clip_loss(image_embeds - base_embeds, text_embed)
         else:
             dists = d_clip_loss(image_embeds, text_embed)
 
         # We want to sum over the averages
         for i in range(self.args.batch_size):
             # We want to average at the "augmentations level"
-            clip_loss = clip_loss + dists[i :: self.args.batch_size].mean()
+            clip_loss = clip_loss + dists[i:: self.args.batch_size].mean()
 
         return clip_loss
 
@@ -260,13 +245,15 @@ class ImageEditor:
         if self.args.vit:
             batch_size, n_patch, n_dim = gen.shape
             style = style.repeat(batch_size, 1, 1)
-            G = torch.bmm(gen.permute(0,2,1), gen) # Naive correspondence to ConvNet-based feature correlation
-            A = torch.bmm(style.permute(0,2,1), style)
+            G = torch.bmm(gen.permute(0, 2, 1), gen)  # Naive correspondence to ConvNet-based feature correlation
+            A = torch.bmm(style.permute(0, 2, 1), style)
         else:
             batch_size, channel, height, width = gen.shape
             style = style.repeat(batch_size, 1, 1, 1)
-            G = torch.bmm(gen.view(batch_size, channel, height * width), gen.view(batch_size, channel, height * width).permute(0,2,1))
-            A = torch.bmm(style.view(batch_size, channel, height * width), style.view(batch_size, channel, height * width).permute(0,2,1))
+            G = torch.bmm(gen.view(batch_size, channel, height * width),
+                          gen.view(batch_size, channel, height * width).permute(0, 2, 1))
+            A = torch.bmm(style.view(batch_size, channel, height * width),
+                          style.view(batch_size, channel, height * width).permute(0, 2, 1))
 
         style_l = torch.norm(G.view(batch_size, -1) - A.view(batch_size, -1), dim=1).mean()
         return style_l
@@ -285,7 +272,7 @@ class ImageEditor:
             # print("style: ", style.size())
             # print("gen: ", gen.size())
             if self.args.ot:
-                loss += torch.norm(style-gen)
+                loss += torch.norm(style - gen)
             else:
                 loss += self.calc_style_loss(gen, style)
 
@@ -294,19 +281,21 @@ class ImageEditor:
     def pseudo_caption(self):
         image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         with torch.no_grad():
-            pseudo_cap = self.mask_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) # in text format (un-tokenized)
+            pseudo_cap = self.mask_model.generate(image, sample=False, num_beams=3, max_length=20,
+                                                  min_length=5)  # in text format (un-tokenized)
         return pseudo_cap
 
     def edit_image_by_prompt(self):
 
-        # mask_np = (self.propose_mask() * 255).astype(np.uint8)
-        # self.attn = TF.to_tensor(Image.fromarray(mask_np))
-        # self.attn = self.attn[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
-        # self.attn.requires_grad = False
+        mask_np = (self.propose_mask() * 255).astype(np.uint8)
+        self.attn = TF.to_tensor(Image.fromarray(mask_np))
+        self.attn = self.attn[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
+        self.attn.requires_grad = False
 
         if self.args.mask_auto:
             mask_np = self.propose_mask()
-            mask_binarized = ((mask_np > self.args.mask_thresh) * 255).astype(np.uint8)  # 0.35: woman and her dog / 0.3: t shirts
+            mask_binarized = ((mask_np > self.args.mask_thresh) * 255).astype(
+                np.uint8)  # 0.35: woman and her dog / 0.3: t shirts
 
             if self.blur:
                 from scipy.ndimage import filters
@@ -336,7 +325,7 @@ class ImageEditor:
             self.mask_ = self.mask.squeeze().cpu().numpy()
             print(self.mask_.shape)
 
-            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1,2,0) * 255).astype(np.uint8))
+            self.mask_pil = TF.to_pil_image((self.mask_.transpose(1, 2, 0) * 255).astype(np.uint8))
 
         if self.args.export_assets:
             mask_path = self.assets_path / Path(
@@ -409,18 +398,13 @@ class ImageEditor:
                 # x_in = out["pred_xstart"]
 
                 loss = torch.tensor(0)
-                if text_embed is not None and self.args.guidance=='clip' and self.args.guidance_lambda != 0:
+                if text_embed is not None and self.args.guidance == 'clip' and self.args.guidance_lambda != 0:
                     clip_loss = self.clip_loss(x_in, text_embed) * self.args.guidance_lambda
                     loss = loss + clip_loss
                     self.metrics_accumulator.update_metric("clip_loss", clip_loss.item())
 
-                elif text_embed is not None and self.args.guidance=='blip' and self.args.guidance_lambda != 0:
-                    if self.args.itm:
-                        blip_loss = self.blip_itm_loss(x_in, self.args.prompt) * self.args.guidance_lambda
-                    elif self.args.itc:
-                        blip_loss = self.blip_itc_loss(x_in, self.args.prompt) * self.args.guidance_lambda
-                    else:
-                        blip_loss = self.blip_loss(x_in, self.args.prompt) * self.args.guidance_lambda
+                elif text_embed is not None and self.args.guidance == 'blip' and self.args.guidance_lambda != 0:
+                    blip_loss = self.blip_loss(x_in, self.args.prompt) * self.args.guidance_lambda
                     loss = loss + blip_loss
                     self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
@@ -435,22 +419,24 @@ class ImageEditor:
 
                     if self.args.lpips_sim_lambda:
                         loss = (
-                            loss
-                            + self.lpips_model(masked_background, self.init_image).sum()
-                            * self.args.lpips_sim_lambda
+                                loss
+                                + self.lpips_model(masked_background, self.init_image).sum()
+                                * self.args.lpips_sim_lambda
                         )
-                        background_loss += self.lpips_model(masked_background, self.init_image).sum() * self.args.lpips_sim_lambda
+                        background_loss += self.lpips_model(masked_background,
+                                                            self.init_image).sum() * self.args.lpips_sim_lambda
                     if self.args.l2_sim_lambda:
                         loss = (
-                            loss
-                            + mse_loss(masked_background, self.init_image) * self.args.l2_sim_lambda
+                                loss
+                                + mse_loss(masked_background, self.init_image) * self.args.l2_sim_lambda
                         )
                         background_loss += mse_loss(masked_background, self.init_image) * self.args.l2_sim_lambda
                     self.metrics_accumulator.update_metric("background_loss", background_loss.item())
 
                 if self.args.style_lambda != 0:
                     style_base, style_gen = self.init_image * self.mask, x_in * self.mask
-                    style_loss = self.style_loss(style_base, style_gen) * self.args.style_lambda # TODO: implement self.style_loss / self.args.style_lambda
+                    style_loss = self.style_loss(style_base,
+                                                 style_gen) * self.args.style_lambda  # TODO: implement self.style_loss / self.args.style_lambda
                     loss = loss + style_loss
                     self.metrics_accumulator.update_metric("style_loss", style_loss.item())
 
@@ -538,7 +524,7 @@ class ImageEditor:
                             if j == total_steps:
                                 path_friendly_distance = formatted_distance.replace(".", "")
                                 ranked_pred_path = self.ranked_results_path / (
-                                    path_friendly_distance + "_" + visualization_path.name
+                                        path_friendly_distance + "_" + visualization_path.name
                                 )
                                 pred_image_pil.save(ranked_pred_path)
                         except:
@@ -596,7 +582,7 @@ class ImageEditor:
     def preprocess_mask(self):
         image = F.resize(self.init_image, [self.mask_model.image_size, self.mask_model.image_size])
         B = image.size(0)
-        image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :] # (B, 576, 768)
+        image_embeds = self.mask_model.visual_encoder(image)[:, 1:, :]  # (B, 576, 768)
         image_embeds = image_embeds.view(B, 24, 24, -1)
 
     def propose_mask(self):
@@ -674,7 +660,8 @@ class ImageEditor:
             optimizer.step()
 
         image_embeds_ = torch.from_numpy(image_embeds_).to(image.device)
-        mask = torch.norm(image_embeds - image_embeds_, dim=2)[0][1:].view(24, 24) # TODO: depends on patch embedding size
+        mask = torch.norm(image_embeds - image_embeds_, dim=2)[0][1:].view(24,
+                                                                           24)  # TODO: depends on patch embedding size
         # print(mask)
 
         mask = FF.interpolate(
@@ -701,4 +688,4 @@ class ImageEditor:
 
         # attn_map_c = (attn_map ** 0.7) * attn_map
         # attn_map_c = attn_map ** 2
-        return attn_map
+        return
