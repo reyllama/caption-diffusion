@@ -30,6 +30,16 @@ def get_arguments() -> argparse.Namespace:
         help="how to provide diffusion guidance"
     )
     parser.add_argument(
+        "--itm",
+        action='store_true',
+        help="to use image-text matching"
+    )
+    parser.add_argument(
+        "--itc",
+        action='store_true',
+        help='to use image-text contrastive'
+    )
+    parser.add_argument(
         "--local_clip_guided_diffusion",
         help="Indicator for using local CLIP guided diffusion (for baseline comparison)",
         action="store_true",
