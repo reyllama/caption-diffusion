@@ -1,15 +1,15 @@
-from models.med import BertConfig, BertModel
+from BLIP.models.med import BertConfig, BertModel
 from transformers import BertTokenizer
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-from models.blip import create_vit, init_tokenizer, load_checkpoint
+from BLIP.models.blip import create_vit, init_tokenizer, load_checkpoint
 
 class BLIP_ITM(nn.Module):
     def __init__(self,                 
-                 med_config = 'configs/med_config.json',  
+                 med_config = 'BLIP/configs/med_config.json',
                  image_size = 384,
                  vit = 'base',
                  vit_grad_ckpt = False,
@@ -35,7 +35,8 @@ class BLIP_ITM(nn.Module):
         self.vision_proj = nn.Linear(vision_width, embed_dim)
         self.text_proj = nn.Linear(text_width, embed_dim)
 
-        self.itm_head = nn.Linear(text_width, 2) 
+        self.itm_head = nn.Linear(text_width, 2)
+        self.image_size = image_size
         
         
     def forward(self, image, caption, match_head='itm'):
