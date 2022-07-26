@@ -29,6 +29,7 @@ from guided_diffusion.guided_diffusion.script_util import (
 )
 from utils.visualization import show_tensor_image, show_editied_masked_image
 from BLIP.models.blip import blip_decoder, blip_feature_extractor
+from BLIP.models.blip_itm import blip_itm
 import json
 from datetime import datetime
 # TODO: move BLIP repo under the root dir
@@ -133,15 +134,18 @@ class ImageEditor:
                 clip.load("ViT-B/16", device=self.device, jit=False)[0].eval().requires_grad_(False)
             )
             self.guidance_size = self.guide_model.visual.input_resolution
-            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
+            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
             self.encoder_model = self.guide_model
         elif self.args.guidance == 'blip':
-            self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device)
+            if self.args.itm or self.args.itc:
+                self.guide_model = blip_itm(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
+            else:
+                self.guide_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
             self.guidance_size = self.guide_model.image_size
-            self.mask_model = self.guide_model
+            self.mask_model = blip_decoder(pretrained=blip_path, image_size=384, vit='base').to(self.device).eval()
             self.encoder_model = blip_feature_extractor(pretrained=encoder_path, image_size=384, vit='base').to(self.device) # TODO: check if image size 384 is compatible
         else:
-            raise ValueError
+            raise ValueError("Unrecognized Guidance Type")
 
         self.normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
 
@@ -173,32 +177,44 @@ class ImageEditor:
 
         return unscaled_timestep
 
-    def blip_loss(self, x_in, text):
+    def _mask_input(self, x_in):
         if self.mask is not None:
             self.mask.requires_grad = False
             masked_input = x_in * self.mask
         else:
             masked_input = x_in
-        augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
+        return masked_input
+
+    def _blip_preprocess(self, x_in, text):
+        masked_input = self._mask_input(x_in)
+        augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
         blip_in = self.normalize(augmented_input)
         blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
-        # loss = torch.zeros([1]).to(self.device)
-        # for view in blip_in:
-        #     loss += self.guide_model(view.unsqueeze(0))
         texts = [text for _ in range(len(blip_in))]
+        return blip_in, texts
+
+    def blip_loss(self, x_in, text):
+        blip_in, texts = self._blip_preprocess(x_in, text)
         loss = self.guide_model(blip_in, texts)
         return loss
+
+    def blip_itc_loss(self, x_in, text):
+        blip_in, texts = self._blip_preprocess(x_in, text)
+        itc_score = self.guide_model(blip_in, texts, match_head='itc')[0].mean()
+        return itc_score
+
+    def blip_itm_loss(self, x_in, text):
+        blip_in, texts = self._blip_preprocess(x_in, text)
+        itm_output = self.guide_model(blip_in, texts, match_head='itm')
+        itm_score = torch.nn.functional.softmax(itm_output, dim=1)[:, 1].mean()
+        return itm_score
 
     def clip_loss(self, x_in, text_embed):
         # incorporate directional loss
         clip_loss = torch.tensor(0)
         x_base = None
 
-        if self.mask is not None:
-            self.mask.requires_grad = False
-            masked_input = x_in * self.mask
-        else:
-            masked_input = x_in
+        masked_input = self._mask_input(x_in)
         augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
         clip_in = self.normalize(augmented_input)
         image_embeds = self.guide_model.encode_image(clip_in).float()
@@ -276,10 +292,10 @@ class ImageEditor:
 
     def edit_image_by_prompt(self):
 
-        mask_np = (self.propose_mask() * 255).astype(np.uint8)
-        self.attn = TF.to_tensor(Image.fromarray(mask_np))
-        self.attn = self.attn[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
-        self.attn.requires_grad = False
+        # mask_np = (self.propose_mask() * 255).astype(np.uint8)
+        # self.attn = TF.to_tensor(Image.fromarray(mask_np))
+        # self.attn = self.attn[0, ...].unsqueeze(0).unsqueeze(0).to(self.device)
+        # self.attn.requires_grad = False
 
         if self.args.mask_auto:
             mask_np = self.propose_mask()
@@ -380,7 +396,12 @@ class ImageEditor:
                     self.metrics_accumulator.update_metric("clip_loss", clip_loss.item())
 
                 elif text_embed is not None and self.args.guidance=='blip' and self.args.guidance_lambda != 0:
-                    blip_loss = self.blip_loss(x_in, self.args.prompt) * self.args.guidance_lambda
+                    if self.args.itm:
+                        blip_loss = self.blip_itm_loss(x_in, self.args.prompt) * self.args.guidance_lambda
+                    elif self.args.itc:
+                        blip_loss = self.blip_itc_loss(x_in, self.args.prompt) * self.args.guidance_lambda
+                    else:
+                        blip_loss = self.blip_loss(x_in, self.args.prompt) * self.args.guidance_lambda
                     loss = loss + blip_loss
                     self.metrics_accumulator.update_metric("blip_loss", blip_loss.item())
 
