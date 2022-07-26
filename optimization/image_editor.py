@@ -184,17 +184,12 @@ class ImageEditor:
             masked_input = x_in * self.mask
         else:
             masked_input = x_in
-<<<<<<< HEAD
         return masked_input
 
     def _blip_preprocess(self, x_in, text):
         masked_input = self._mask_input(x_in)
         augmented_input = self.image_augmentations(masked_input).add(1).div(2)  # scaling (-1~1 -> 0~1)
-=======
-
         augmented_input = self.image_augmentations(masked_input).add(1).div(2) # scaling (-1~1 -> 0~1)
-        
->>>>>>> 3390e2bdda1ff46577a69be60b897e226e8be8eb
         blip_in = self.normalize(augmented_input)
         blip_in = FF.interpolate(blip_in, (self.guidance_size, self.guidance_size))
         texts = [text for _ in range(len(blip_in))]
